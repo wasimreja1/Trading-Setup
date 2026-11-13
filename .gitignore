@@ -1,0 +1,11 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Runtime output the tools write
+trader/
+
+# Local editor / OS files
+.DS_Store
+.vscode/
+.idea/

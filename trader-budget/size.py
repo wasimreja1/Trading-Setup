@@ -83,6 +83,29 @@ DEFAULTS = {
     "allow_short": False,
     "pdt_guard": False,
 }
+
+# -------- market selection (NSE by default; set TRADER_MARKET=US for US equities) --------
+# NSE/BSE trade on IST from 9:15 to 15:30. The table redefines the entry-window
+# and flat-by defaults; the US path keeps NYSE hours.
+def market_name():
+    return (os.environ.get("TRADER_MARKET") or "NSE").strip().upper()
+
+MARKETS = {
+    "US": {"tz": "ET", "tz_label": "New York", "no_entries_before": "09:45", "no_entries_after": "15:30", "flat_by": "15:55"},
+    "NSE": {"tz": "IST", "tz_label": "IST", "no_entries_before": "09:30", "no_entries_after": "15:15", "flat_by": "15:25"},
+}
+MARKETS["BSE"] = MARKETS["NSE"]
+
+
+def market():
+    return MARKETS.get(market_name(), MARKETS["NSE"])
+
+
+_M = market()
+TZ_LABEL = _M["tz_label"]
+DEFAULTS["no_entries_before"] = _M["no_entries_before"]
+DEFAULTS["no_entries_after"] = _M["no_entries_after"]
+DEFAULTS["flat_by"] = _M["flat_by"]
 EPS = 1e-9
 FRESH_MINUTES = 15
 SETUP_WORDS = {"orb": "opening-range breakout", "flag": "flag", "bounce": "oversold bounce"}
@@ -111,11 +134,20 @@ def eastern_offset(utc):
     return -4 if start <= naive < end else -5
 
 
+def local_offset(utc):
+    """Minutes to add to naive UTC to get the market's wall clock."""
+    if market()["tz"] == "IST":
+        return 330
+    return eastern_offset(utc) * 60
+
+
 def to_eastern(utc):
-    return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
+    return utc.replace(tzinfo=None) + datetime.timedelta(minutes=local_offset(utc))
 
 
 def eastern_to_utc(local):
+    if market()["tz"] == "IST":
+        return local - datetime.timedelta(minutes=330)
     for off in (-4, -5):
         utc = local - datetime.timedelta(hours=off)
         if eastern_offset(utc) == off:
@@ -320,8 +352,8 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     if side != "buy":
         raise SizeError("this pack sizes long (buy) day trades only; the plan says %r" % side)
     if today and plan.get("date") and str(plan["date"]) != today:
-        raise SizeError("the plan is for %s and today is %s in New York: make a new plan with trader-exit"
-                        % (plan["date"], today))
+        raise SizeError("the plan is for %s and today is %s in %s: make a new plan with trader-exit"
+                        % (plan["date"], today, TZ_LABEL))
     entry_plan, stop, target = _f(plan.get("entry")), _f(plan.get("stop")), _f(plan.get("target"))
     for name, v in (("entry", entry_plan), ("stop", stop), ("target", target)):
         if v is None or v <= 0:
@@ -477,8 +509,8 @@ def plan_report(s, order, notes=()):
                  % (order["qty"], order["symbol"], how, order["take_profit_limit_price"],
                     order["stop_loss_stop_price"]))
     if s["flat_by"]:
-        lines.append("Flat by %s New York: anything still open then gets closed (trader-alerts rings, "
-                     "trader-broker flatten)." % s["flat_by"])
+        lines.append("Flat by %s %s: anything still open then gets closed (trader-alerts rings, "
+                     "trader-broker flatten)." % (s["flat_by"], TZ_LABEL))
     lines.append("")
     lines.append("Next: trader-risk checks it, then trader-broker asks you yes or no.")
     lines.append("Education and tooling, not financial advice.")
@@ -793,12 +825,12 @@ def run_plan(a, cfg):
         if p is not None and fresh:
             price = p
             if round_cent(p) > round_cent(_f(plan.get("entry")) or 0):
-                notes.append("%s last %s (as of %s New York) is above the plan's entry %s, so the risk "
-                             "is bigger: sized at %s." % (sym, _price(p), to_eastern(t).strftime("%H:%M"),
+                notes.append("%s last %s (as of %s %s) is above the plan's entry %s, so the risk "
+                             "is bigger: sized at %s." % (sym, _price(p), to_eastern(t).strftime("%H:%M"), TZ_LABEL,
                                                           _price(plan.get("entry")), _price(p)))
         elif p is not None:
             notes.append("%s in %s is %s: not used (older than %d minutes). Sized at the plan's entry."
-                         % (sym, ppath, ("from " + to_eastern(t).strftime("%Y-%m-%d %H:%M") + " New York")
+                         % (sym, ppath, ("from " + to_eastern(t).strftime("%Y-%m-%d %H:%M") + " " + TZ_LABEL)
                             if t else "undated", FRESH_MINUTES))
     cash = None
     if a.portfolio and os.path.exists(a.portfolio):

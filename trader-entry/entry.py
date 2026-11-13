@@ -103,6 +103,56 @@ OPEN = datetime.time(9, 30)
 CLOSE = datetime.time(16, 0)
 EARLY = datetime.time(13, 0)
 
+# -------- market selection (NSE by default; set TRADER_MARKET=US for US equities) --------
+# NSE/BSE trade on IST (UTC+5:30, no daylight saving) from 9:15 to 15:30. The US
+# path above keeps NYSE hours and its holiday calendar. The market table below
+# redefines the session constants for whichever market is selected.
+def market_name():
+    return (os.environ.get("TRADER_MARKET") or "NSE").strip().upper()
+
+# NSE/BSE weekday trading holidays, best effort for 2026. Third-party lists
+# disagree on a few dates, so VERIFY against the official circular at
+# nseindia.com and edit this map. 2027 is left blank on purpose.
+NSE_HOLIDAYS = {
+    "2026-01-26": "Republic Day",
+    "2026-03-03": "Holi",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Ambedkar Jayanti",
+    "2026-05-01": "Maharashtra Day",
+    "2026-05-28": "Bakri Id",
+    "2026-06-26": "Muharram",
+    "2026-09-14": "Ganesh Chaturthi",
+    "2026-10-20": "Dussehra",
+    "2026-12-25": "Christmas",
+}
+
+MARKETS = {
+    "US": {"exchange": "NYSE", "hol_label": "NYSE", "tz": "ET",
+           "open": (9, 30), "close": (16, 0), "session_bars": 78,
+           "holidays": NYSE_HOLIDAYS, "early": NYSE_EARLY_CLOSE, "calendar_years": (2026, 2027),
+           "no_entries_before": "09:45", "no_entries_after": "15:30", "flat_by": "15:55"},
+    "NSE": {"exchange": "NSE", "hol_label": "NSE", "tz": "IST",
+            "open": (9, 15), "close": (15, 30), "session_bars": 75,
+            "holidays": NSE_HOLIDAYS, "early": {}, "calendar_years": (2026,),
+            "no_entries_before": "09:30", "no_entries_after": "15:15", "flat_by": "15:25"},
+}
+MARKETS["BSE"] = dict(MARKETS["NSE"], exchange="BSE", hol_label="BSE")
+
+
+def market():
+    return MARKETS.get(market_name(), MARKETS["NSE"])
+
+
+_M = market()
+EXCHANGE = _M["exchange"]
+HOL_LABEL = _M["hol_label"]
+TZ_ABBREV = _M["tz"]
+TZ_LABEL = "New York" if _M["tz"] == "ET" else _M["tz"]
+OPEN = datetime.time(*_M["open"])
+CLOSE = datetime.time(*_M["close"])
+CALENDAR_YEARS = _M["calendar_years"]
+DEFAULTS = {"no_entries_before": _M["no_entries_before"], "no_entries_after": _M["no_entries_after"]}
+
 
 class EntryError(Exception):
     pass
@@ -127,11 +177,20 @@ def eastern_offset(utc):
     return -4 if start <= naive < end else -5
 
 
+def local_offset(utc):
+    """Minutes to add to naive UTC to get the market's wall clock."""
+    if market()["tz"] == "IST":
+        return 330
+    return eastern_offset(utc) * 60
+
+
 def to_eastern(utc):
-    return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
+    return utc.replace(tzinfo=None) + datetime.timedelta(minutes=local_offset(utc))
 
 
 def eastern_to_utc(local):
+    if market()["tz"] == "IST":
+        return local - datetime.timedelta(minutes=330)
     for off in (-4, -5):
         utc = local - datetime.timedelta(hours=off)
         if eastern_offset(utc) == off:
@@ -199,28 +258,28 @@ def ampm(t):
 
 
 def trading_day(d):
-    """(is_trading_day, reason). Weekends and the NYSE holiday list."""
+    """(is_trading_day, reason). Weekends and the market's holiday list."""
     if d.weekday() >= 5:
         return False, "weekend"
-    name = NYSE_HOLIDAYS.get(d.isoformat())
+    name = market()["holidays"].get(d.isoformat())
     if name:
-        return False, "NYSE holiday: " + name
+        return False, "%s holiday: %s" % (HOL_LABEL, name)
     return True, ""
 
 
 def session(d):
-    """(open_time, close_time) in New York time, or None if closed all day."""
+    """(open_time, close_time) in the market's local time, or None if closed all day."""
     ok, _ = trading_day(d)
     if not ok:
         return None
-    return OPEN, (EARLY if d.isoformat() in NYSE_EARLY_CLOSE else CLOSE)
+    return OPEN, (EARLY if d.isoformat() in market()["early"] else CLOSE)
 
 
 def next_open(d):
     nd = d + datetime.timedelta(days=1)
     for _ in range(15):
         if session(nd):
-            return "%s 09:30" % nd.isoformat()
+            return "%s %s" % (nd.isoformat(), hm(OPEN))
         nd += datetime.timedelta(days=1)
     return None
 
@@ -228,7 +287,11 @@ def next_open(d):
 # ---------------------------------------------------------------- Yahoo
 
 def yahoo_symbol(sym):
-    return sym.upper().replace(".", "-")
+    s = sym.upper()
+    for suffix in (".NS", ".BO", ".NSE", ".BSE"):
+        if s.endswith(suffix):
+            return s[: -len(suffix)].replace(".", "-") + suffix
+    return s.replace(".", "-")
 
 
 def chart_path(sym, rng, interval):
@@ -430,7 +493,7 @@ def evaluate(chart, now_utc, setup="orb", or_minutes=15, interval="5m", level=No
     res["data_time"] = to_eastern(utc_of(dt)).strftime("%Y-%m-%d %H:%M:%S") if dt else None
     ok, why = trading_day(day)
     if not ok:
-        res.update(status="no-data", phase="closed", reason="the NYSE is closed today (%s)" % why,
+        res.update(status="no-data", phase="closed", reason="the %s is closed today (%s)" % (EXCHANGE, why),
                    next_open=next_open(day))
         return res
     o, c = session(day)
@@ -475,7 +538,7 @@ def evaluate(chart, now_utc, setup="orb", or_minutes=15, interval="5m", level=No
     res["bars_closed"] = len(bars)
 
     if local < open_dt:
-        res.update(phase="pre-open", reason="the NYSE opens at 9:30%s" % (
+        res.update(phase="pre-open", reason="the %s opens at %s%s" % (EXCHANGE, short(OPEN),
             " and the %d-minute range is set at %s" % (or_minutes, short(or_end)) if setup == "orb" else ""))
         return res
 
@@ -595,8 +658,8 @@ def describe(res):
     """Plain lines for a person."""
     when = datetime.datetime.strptime(res["now"], "%Y-%m-%d %H:%M:%S")
     bars = "5-minute" if res["interval"] == "5m" else "1-minute"
-    head = "%s  %s %s ET  %s on %s bars (Yahoo, free, can lag)" % (
-        res["symbol"], when.strftime("%a %Y-%m-%d"), when.strftime("%H:%M"), setup_name(res), bars)
+    head = "%s  %s %s %s  %s on %s bars (Yahoo, free, can lag)" % (
+        res["symbol"], when.strftime("%a %Y-%m-%d"), when.strftime("%H:%M"), TZ_ABBREV, setup_name(res), bars)
     if res.get("data_time") and res["data_time"] <= res["now"] and res["data_time"][:10] == res["date"]:
         head += ", data to %s" % res["data_time"][11:]
     out = [head]
@@ -638,7 +701,7 @@ def describe(res):
         if res["status"] == "expired":
             out.append("No entry on this setup today. Nothing was placed.")
         if res.get("next_open"):
-            out.append("Next open: %s New York." % res["next_open"])
+            out.append("Next open: %s %s." % (res["next_open"], TZ_LABEL))
     if res.get("early_close"):
         out.append("Early close today at 1:00 p.m. (%s): no new entries after %s." % (
             res["early_close"], res["no_entries_after"]))
@@ -715,8 +778,8 @@ def watch_loop(provider, clock, sleep, emit, opts, every=30, until=None, max_err
         close_dt = datetime.datetime.combine(day, s[1])
         if local < open_dt + datetime.timedelta(seconds=step):
             if not said_preopen:
-                emit("%s ET  %s: watching from the first bar's close at %s." % (
-                    local.strftime("%H:%M"), "not open yet" if local < open_dt else "open, no bar closed yet",
+                emit("%s %s  %s: watching from the first bar's close at %s." % (
+                    local.strftime("%H:%M"), TZ_ABBREV, "not open yet" if local < open_dt else "open, no bar closed yet",
                     short(open_dt + datetime.timedelta(seconds=step))))
                 said_preopen = True
             next_fetch = eastern_to_utc(open_dt) + datetime.timedelta(seconds=step + GRACE)
@@ -726,7 +789,7 @@ def watch_loop(provider, clock, sleep, emit, opts, every=30, until=None, max_err
             errors = 0
         except EntryError as e:
             errors += 1
-            emit("%s ET  could not read bars: %s" % (local.strftime("%H:%M:%S"), e))
+            emit("%s %s  could not read bars: %s" % (local.strftime("%H:%M:%S"), TZ_ABBREV, e))
             if errors >= max_errors:
                 emit("Stopping after %d failed reads in a row." % errors)
                 return 1, None

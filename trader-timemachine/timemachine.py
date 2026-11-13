@@ -103,6 +103,42 @@ NYSE_EARLY_CLOSE = {  # 1:00 p.m. ET, from https://www.nyse.com/markets/hours-ca
 }
 EARLY_MIN = 13 * 60
 
+# -------- market selection (NSE by default; set TRADER_MARKET=US for US equities) --------
+# NSE/BSE trade on IST (UTC+5:30, no daylight saving) from 9:15 to 15:30 (75
+# five-minute bars). The US path keeps NYSE hours (78 bars). The table redefines
+# the session length and bar window for whichever market is selected.
+def market_name():
+    return (os.environ.get("TRADER_MARKET") or "NSE").strip().upper()
+
+MARKETS = {
+    "US": {"tz": "ET", "open": (9, 30), "close": (16, 0), "session_bars": 78,
+           "early": NYSE_EARLY_CLOSE, "early_min": 13 * 60},
+    "NSE": {"tz": "IST", "open": (9, 15), "close": (15, 30), "session_bars": 75,
+            "early": {}, "early_min": 13 * 60},
+}
+MARKETS["BSE"] = MARKETS["NSE"]
+
+
+def market():
+    return MARKETS.get(market_name(), MARKETS["NSE"])
+
+
+def yahoo_symbol(sym):
+    s = sym.upper()
+    for suffix in (".NS", ".BO", ".NSE", ".BSE"):
+        if s.endswith(suffix):
+            return s[: -len(suffix)].replace(".", "-") + suffix
+    return s.replace(".", "-")
+
+
+_M = market()
+SESSION_BARS = _M["session_bars"]
+OPEN_MIN = _M["open"][0] * 60 + _M["open"][1]
+CLOSE_MIN = _M["close"][0] * 60 + _M["close"][1]
+EARLY_MIN = _M["early_min"]
+CLOSE = datetime.time(*_M["close"])
+UNTIL_DEFAULT = "%02d:%02d" % (CLOSE.hour, CLOSE.minute)
+
 
 class TMError(Exception):
     pass
@@ -127,11 +163,20 @@ def eastern_offset(utc):
     return -4 if start <= naive < end else -5
 
 
+def local_offset(utc):
+    """Minutes to add to naive UTC to get the market's wall clock."""
+    if market()["tz"] == "IST":
+        return 330
+    return eastern_offset(utc) * 60
+
+
 def to_eastern(utc):
-    return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
+    return utc.replace(tzinfo=None) + datetime.timedelta(minutes=local_offset(utc))
 
 
 def eastern_to_utc(local):
+    if market()["tz"] == "IST":
+        return local - datetime.timedelta(minutes=330)
     for off in (-4, -5):
         utc = local - datetime.timedelta(hours=off)
         if eastern_offset(utc) == off:
@@ -187,7 +232,7 @@ def clock24(minutes):
 
 def chart_url(sym, host="query2"):
     return "https://%s.finance.yahoo.com/v8/finance/chart/%s?range=60d&interval=5m" % (
-        host, urllib.parse.quote(sym.upper().replace(".", "-")))
+        host, urllib.parse.quote(yahoo_symbol(sym)))
 
 
 def _sleep(seconds):
@@ -315,16 +360,41 @@ def split_sessions(bars):
     return days
 
 
+def _fill_session(s):
+    """A full slot list from a session with a few missing interior bars, carrying
+    the previous bar's close across each gap (a flat, zero-volume bar)."""
+    out, prev = [], None
+    for i in range(SESSION_BARS):
+        b = s.get(i)
+        if b is None:
+            c = prev["c"]
+            b = {"date": prev["date"], "slot": i, "start": "", "o": c, "h": c, "l": c, "c": c, "v": 0}
+        out.append(b)
+        prev = b
+    return out
+
+
+# NSE/BSE live 5-minute data has the odd empty bar, so a session rarely lands on
+# exactly SESSION_BARS. On those markets, carry across up to this many interior
+# gaps when the open and the last slot are both present. US data is clean, so
+# this never changes the US path (and the regression suite pins US).
+MAX_SESSION_GAP = 8
+
+
 def full_sessions(days, before):
-    """Full sessions (all 78 bars) strictly before the plan's date, oldest first,
-    and the short ones that were left out (half days, gaps)."""
+    """Full sessions (all SESSION_BARS bars) strictly before the plan's date, oldest
+    first, and the short ones that were left out (half days, big gaps)."""
     full, short = [], []
+    fill_gaps = market()["tz"] == "IST"
     for d in sorted(days):
         if d >= before:
             continue
         s = days[d]
         if len(s) == SESSION_BARS:
             full.append((d, [s[i] for i in range(SESSION_BARS)]))
+        elif (fill_gaps and 0 in s and (SESSION_BARS - 1) in s
+              and len(s) >= SESSION_BARS - MAX_SESSION_GAP):
+            full.append((d, _fill_session(s)))
         else:
             short.append({"date": d, "bars": len(s)})
     return full, short
@@ -531,7 +601,7 @@ def load_plan(a, now_utc):
 def normalize_plan(raw, src="flags"):
     """A plan dict (trader/plan.json shape) -> the checked plan the time machine runs."""
     sym = str(raw.get("symbol") or "").strip().upper()
-    if not re.match(r"^[A-Z][A-Z0-9.\-]{0,9}$", sym):
+    if not re.match(r"^[A-Z][A-Z0-9.\-]{0,15}$", sym):
         raise TMError("the plan needs a ticker symbol, got %r" % raw.get("symbol"))
     side = str(raw.get("side") or "buy").lower()
     if side not in ("buy", "sell"):
@@ -624,7 +694,7 @@ def resolve_rule(plan, entry_day):
 # ---------------------------------------------------------------- the run
 
 def _until12(mc):
-    t = mc.get("until") or "16:00"
+    t = mc.get("until") or UNTIL_DEFAULT
     return clock12(int(t[:2]) * 60 + int(t[3:]))
 
 
@@ -686,7 +756,7 @@ def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=No
     result = chart_result(text, sym)
     meta, bars, dropped = parse_bars(result, now_utc)
     msym = str(meta.get("symbol") or "").upper()
-    if msym and msym != sym.replace(".", "-"):
+    if msym and msym != yahoo_symbol(sym):
         raise TMError("the data is for %s but the plan is for %s" % (msym, sym))
     gran = meta.get("dataGranularity")
     if gran and gran != "5m":
@@ -694,7 +764,7 @@ def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=No
     if not bars:
         raise TMError("no complete 5-minute bars for %s in the data" % sym)
     k = plan["entry_bar"]
-    early = plan["date"] in NYSE_EARLY_CLOSE
+    early = plan["date"] in market()["early"]
     end_min = EARLY_MIN if early else CLOSE_MIN
     until_min = end_min if until is None else parse_clock(until, "--until")
     if (until_min - OPEN_MIN) % 5 or until_min > end_min:

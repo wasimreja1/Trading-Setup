@@ -92,6 +92,54 @@ OPEN = datetime.time(9, 30)
 CLOSE = datetime.time(16, 0)
 EARLY = datetime.time(13, 0)
 
+# -------- market selection (NSE by default; set TRADER_MARKET=US for US equities) --------
+# NSE/BSE trade on IST (UTC+5:30, no daylight saving) from 9:15 to 15:30. The US
+# path above keeps NYSE hours. The table redefines the session and the flat-by.
+def market_name():
+    return (os.environ.get("TRADER_MARKET") or "NSE").strip().upper()
+
+# NSE/BSE weekday trading holidays, best effort for 2026. VERIFY against the
+# official circular at nseindia.com and edit this map. 2027 is left blank.
+NSE_HOLIDAYS = {
+    "2026-01-26": "Republic Day",
+    "2026-03-03": "Holi",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Ambedkar Jayanti",
+    "2026-05-01": "Maharashtra Day",
+    "2026-05-28": "Bakri Id",
+    "2026-06-26": "Muharram",
+    "2026-09-14": "Ganesh Chaturthi",
+    "2026-10-20": "Dussehra",
+    "2026-12-25": "Christmas",
+}
+
+MARKETS = {
+    "US": {"tz": "ET", "tz_abbrev": "ET", "open": (9, 30), "close": (16, 0),
+           "holidays": NYSE_HOLIDAYS, "early": NYSE_EARLY_CLOSE, "flat_by": "15:55"},
+    "NSE": {"tz": "IST", "tz_abbrev": "IST", "open": (9, 15), "close": (15, 30),
+            "holidays": NSE_HOLIDAYS, "early": {}, "flat_by": "15:25"},
+}
+MARKETS["BSE"] = MARKETS["NSE"]
+
+
+def market():
+    return MARKETS.get(market_name(), MARKETS["NSE"])
+
+
+def yahoo_symbol(sym):
+    s = sym.upper()
+    for suffix in (".NS", ".BO", ".NSE", ".BSE"):
+        if s.endswith(suffix):
+            return s[: -len(suffix)].replace(".", "-") + suffix
+    return s.replace(".", "-")
+
+
+_M = market()
+TZ_ABBREV = _M["tz_abbrev"]
+OPEN = datetime.time(*_M["open"])
+CLOSE = datetime.time(*_M["close"])
+DEFAULTS = {"flat_by": _M["flat_by"], "min_reward_risk": 1.0}
+
 
 class PlanError(Exception):
     pass
@@ -114,11 +162,20 @@ def eastern_offset(utc):
     return -4 if start <= naive < end else -5
 
 
+def local_offset(utc):
+    """Minutes to add to naive UTC to get the market's wall clock."""
+    if market()["tz"] == "IST":
+        return 330
+    return eastern_offset(utc) * 60
+
+
 def to_eastern(utc):
-    return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
+    return utc.replace(tzinfo=None) + datetime.timedelta(minutes=local_offset(utc))
 
 
 def eastern_to_utc(local):
+    if market()["tz"] == "IST":
+        return local - datetime.timedelta(minutes=330)
     for off in (-4, -5):
         utc = local - datetime.timedelta(hours=off)
         if eastern_offset(utc) == off:
@@ -185,10 +242,10 @@ def ampm(t):
 
 
 def session(d):
-    """(open_time, close_time) in New York time, or None if closed all day."""
-    if d.weekday() >= 5 or d.isoformat() in NYSE_HOLIDAYS:
+    """(open_time, close_time) in the market's local time, or None if closed all day."""
+    if d.weekday() >= 5 or d.isoformat() in market()["holidays"]:
         return None
-    return OPEN, (EARLY if d.isoformat() in NYSE_EARLY_CLOSE else CLOSE)
+    return OPEN, (EARLY if d.isoformat() in market()["early"] else CLOSE)
 
 
 # ---------------------------------------------------------------- money math (Decimal, to the cent)
@@ -391,7 +448,7 @@ def read_text(path):
 
 
 def load_chart(sym, interval, day, offline=None):
-    ysym = sym.upper().replace(".", "-")
+    ysym = yahoo_symbol(sym)
     if offline:
         path = offline
         if os.path.isdir(offline):
@@ -517,7 +574,7 @@ def resolve_flat_by(day, explicit, cfg, entry_time):
             if moved.time() <= OPEN:
                 raise PlanError("flat_by %s in the config is at or after the close" % hm(t))
             t = moved.time()
-            note = "moved up for the 1:00 p.m. early close (%s)" % NYSE_EARLY_CLOSE.get(day.isoformat(), "")
+            note = "moved up for the 1:00 p.m. early close (%s)" % market()["early"].get(day.isoformat(), "")
     if entry_time and entry_time >= t:
         raise PlanError("the entry at %s is at or after your flat-by %s: there is no time left to hold it"
                         % (ampm(entry_time), hm(t)))
@@ -643,7 +700,7 @@ def describe(plan):
     out.append("  Target        %s  %s" % (money(plan["target"]), plan["target_label"]))
     out.append("  Risk a share  %s (%s%% of the entry)" % (money(plan["risk_per_share"]), pct))
     out.append("  Reward:risk   %s" % ratio(plan["reward_risk"]))
-    out.append("  Flat by       %s ET, win or lose: no overnight hold" % plan["flat_by"])
+    out.append("  Flat by       %s %s, win or lose: no overnight hold" % (plan["flat_by"], TZ_ABBREV))
     out.append("Set before the entry. If price hits the stop, you are out; never move it further away.")
     out.append(NOTE)
     return out

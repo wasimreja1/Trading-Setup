@@ -125,6 +125,54 @@ OPEN = datetime.time(9, 30)
 CLOSE = datetime.time(16, 0)
 EARLY = datetime.time(13, 0)
 
+# -------- market selection (NSE by default; set TRADER_MARKET=US for US equities) --------
+# NSE/BSE trade on IST (UTC+5:30, no daylight saving) from 9:15 to 15:30. The US
+# path above keeps NYSE hours. The market table below redefines the session.
+def market_name():
+    return (os.environ.get("TRADER_MARKET") or "NSE").strip().upper()
+
+# NSE/BSE weekday trading holidays, best effort for 2026. Third-party lists
+# disagree on a few dates, so VERIFY against the official circular at
+# nseindia.com and edit this map. 2027 is left blank on purpose.
+NSE_HOLIDAYS = {
+    "2026-01-26": "Republic Day",
+    "2026-03-03": "Holi",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Ambedkar Jayanti",
+    "2026-05-01": "Maharashtra Day",
+    "2026-05-28": "Bakri Id",
+    "2026-06-26": "Muharram",
+    "2026-09-14": "Ganesh Chaturthi",
+    "2026-10-20": "Dussehra",
+    "2026-12-25": "Christmas",
+}
+
+MARKETS = {
+    "US": {"exchange": "NYSE", "hol_label": "NYSE", "tz": "ET", "tz_label": "New York", "tz_abbrev": "ET",
+           "open": (9, 30), "close": (16, 0), "holidays": NYSE_HOLIDAYS, "early": NYSE_EARLY_CLOSE,
+           "calendar_years": (2026, 2027), "no_entries_after": "15:30"},
+    "NSE": {"exchange": "NSE", "hol_label": "NSE", "tz": "IST", "tz_label": "IST", "tz_abbrev": "IST",
+            "open": (9, 15), "close": (15, 30), "holidays": NSE_HOLIDAYS, "early": {},
+            "calendar_years": (2026,), "no_entries_after": "15:15"},
+}
+MARKETS["BSE"] = dict(MARKETS["NSE"], exchange="BSE", hol_label="BSE")
+
+
+def market():
+    return MARKETS.get(market_name(), MARKETS["NSE"])
+
+
+_M = market()
+EXCHANGE = _M["exchange"]
+HOL_LABEL = _M["hol_label"]
+TZ_LABEL = _M["tz_label"]
+TZ_ABBREV = _M["tz_abbrev"]
+OPEN = datetime.time(*_M["open"])
+CLOSE = datetime.time(*_M["close"])
+CALENDAR_YEARS = _M["calendar_years"]
+OPEN_LABEL = "%d:%02d" % (OPEN.hour, OPEN.minute)
+DEFAULT_NO_ENTRIES_AFTER = _M["no_entries_after"]
+
 SETUPS = [
     ("breakout_20d", "20-day closing-high breakout"),
     ("bull_flag", "bull flag"),
@@ -158,11 +206,20 @@ def eastern_offset(utc):
     return -4 if start <= naive < end else -5
 
 
+def local_offset(utc):
+    """Minutes to add to naive UTC to get the market's wall clock."""
+    if market()["tz"] == "IST":
+        return 330
+    return eastern_offset(utc) * 60
+
+
 def to_eastern(utc):
-    return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
+    return utc.replace(tzinfo=None) + datetime.timedelta(minutes=local_offset(utc))
 
 
 def eastern_to_utc(local):
+    if market()["tz"] == "IST":
+        return local - datetime.timedelta(minutes=330)
     for off in (-4, -5):
         utc = local - datetime.timedelta(hours=off)
         if eastern_offset(utc) == off:
@@ -200,18 +257,18 @@ def trading_day(d):
     """(is_trading_day, reason). Weekends and the NYSE holiday list."""
     if d.weekday() >= 5:
         return False, "weekend"
-    name = NYSE_HOLIDAYS.get(d.isoformat())
+    name = market()["holidays"].get(d.isoformat())
     if name:
-        return False, "NYSE holiday: " + name
+        return False, "%s holiday: %s" % (HOL_LABEL, name)
     return True, ""
 
 
 def session(d):
-    """(open_time, close_time) in New York time, or None if closed all day."""
+    """(open_time, close_time) in the market's local time, or None if closed all day."""
     ok, _ = trading_day(d)
     if not ok:
         return None
-    return OPEN, (EARLY if d.isoformat() in NYSE_EARLY_CLOSE else CLOSE)
+    return OPEN, (EARLY if d.isoformat() in market()["early"] else CLOSE)
 
 
 def clock_label(t):
@@ -268,7 +325,13 @@ def yahoo_get(path):
 
 
 def to_yahoo(sym):
-    return sym.upper().replace(".", "-")
+    s = sym.upper()
+    # Preserve exchange suffixes Yahoo expects with a dot (e.g. .NS/.BO for
+    # India's NSE/BSE). Only the US class-share dot (BRK.B) becomes a dash.
+    for suffix in (".NS", ".BO", ".NSE", ".BSE"):
+        if s.endswith(suffix):
+            return s[: -len(suffix)].replace(".", "-") + suffix
+    return s.replace(".", "-")
 
 
 def spark_path(symbols, rng, interval):
@@ -661,25 +724,25 @@ def orb_window(now_utc, at, or_minutes, until, explicit_day=None):
     if at is not None:
         cutoff = datetime.datetime.combine(day, at)
         if explicit_day is None and cutoff > now + datetime.timedelta(seconds=59):
-            raise ScanError("--at %s is later than now (%s ET)." % (at.strftime("%H:%M"), clock_label(now)))
+            raise ScanError("--at %s is later than now (%s %s)." % (at.strftime("%H:%M"), clock_label(now), TZ_ABBREV))
         if cutoff > close_dt:
             raise ScanError("--at %s is after the %s close on %s." % (at.strftime("%H:%M"), clock_label(close_dt),
                                                                        day_label(day)))
     else:
         cutoff = now.replace(second=0, microsecond=0)
         if cutoff >= close_dt:
-            raise ScanError("The market closed at %s ET on %s. Replay the session with --at 10:15."
-                            % (clock_label(close_dt), day_label(day)))
+            raise ScanError("The market closed at %s %s on %s. Replay the session with --at %s."
+                            % (clock_label(close_dt), TZ_ABBREV, day_label(day), OPEN_LABEL))
     if cutoff < first_close:
-        raise ScanError("It is %s ET: the %d-minute opening range runs 9:30 to %s and the first bar after it "
+        raise ScanError("It is %s %s: the %d-minute opening range runs %s to %s and the first bar after it "
                         "closes at %s. Run orb again after %s."
-                        % (clock_label(cutoff), or_minutes, clock_label(range_end), clock_label(first_close),
-                           clock_label(first_close)))
+                        % (clock_label(cutoff), TZ_ABBREV, or_minutes, OPEN_LABEL, clock_label(range_end),
+                           clock_label(first_close), clock_label(first_close)))
     if until is not None and cutoff.time() > until:
-        raise ScanError("It is %s ET, after %s, your last time for new entries (no_entries_after): an "
+        raise ScanError("It is %s %s, after %s, your last time for new entries (no_entries_after): an "
                         "opening-range breakout found now is expired. Run orb tomorrow after %s, or replay "
-                        "today with --at 10:15." % (clock_label(cutoff), until.strftime("%H:%M"),
-                                                      clock_label(first_close)))
+                        "today with --at %s." % (clock_label(cutoff), TZ_ABBREV, until.strftime("%H:%M"),
+                                                 clock_label(first_close), OPEN_LABEL))
     return day, cutoff
 
 
@@ -907,8 +970,8 @@ def cmd_daily(a):
         print(json.dumps(dict(doc, counts=counts, seconds=round(time.time() - t0, 1)), indent=2))
         return 0 if hits else 1
     local = to_eastern(now)
-    print("Daily scan, %s ET, closes through %s (Yahoo spark, daily closes only)." % (
-        local.strftime("%a %Y-%m-%d %H:%M"), last_date.isoformat() if last_date else "nothing"))
+    print("Daily scan, %s %s, closes through %s (Yahoo spark, daily closes only)." % (
+        local.strftime("%a %Y-%m-%d %H:%M"), TZ_ABBREV, last_date.isoformat() if last_date else "nothing"))
     print("Fetched %s of %s charts%s. %s passed the liquidity filter ($%s+ and %s+ shares)%s; "
           "%s scanned." % ("{:,}".format(counts["fetched"]), "{:,}".format(len(symbols)),
                            (" (%s failed or had no data)" % "{:,}".format(nfailed)) if nfailed else "",
@@ -944,7 +1007,7 @@ def cmd_orb(a):
     now = parse_now(a.now)
     at = parse_hhmm(a.at) if a.at else None
     cfg = read_config(a.config)
-    until = parse_hhmm(a.until or cfg.get("no_entries_after") or "15:30", "--until")
+    until = parse_hhmm(a.until or cfg.get("no_entries_after") or DEFAULT_NO_ENTRIES_AFTER, "--until")
     data = failed = None
     explicit_day = None
     offline_syms = None
@@ -982,7 +1045,7 @@ def cmd_orb(a):
     failed = dict(failed or {})
     failed.update(failed2)
     nfailed = len([s for s in symbols if s in failed])
-    as_of = "%s %s ET" % (day.isoformat(), cutoff.strftime("%H:%M"))
+    as_of = "%s %s %s" % (day.isoformat(), cutoff.strftime("%H:%M"), TZ_ABBREV)
     doc = {"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "orb",
            "as_of": as_of, "universe": len(symbols), "scanned": counts["scanned"], "failed": nfailed,
            "unconfirmed": counts["unconfirmed"], "source": "yahoo", "or_minutes": a.or_minutes,
@@ -995,8 +1058,9 @@ def cmd_orb(a):
     if a.json:
         print(json.dumps(dict(doc, counts=counts, seconds=round(time.time() - t0, 1)), indent=2))
         return 0 if hits else 1
-    print("Opening-range breakout scan, %s %s ET: %d-minute range (9:30 to %s), 5-minute bars, Yahoo."
-          % (day_label(day), clock_label(cutoff), a.or_minutes, clock_label(slot(day, a.or_minutes // BAR_MIN))))
+    print("Opening-range breakout scan, %s %s %s: %d-minute range (%s to %s), 5-minute bars, Yahoo."
+          % (day_label(day), clock_label(cutoff), TZ_ABBREV, a.or_minutes, OPEN_LABEL,
+             clock_label(slot(day, a.or_minutes // BAR_MIN))))
     print("Fetched %s of %s charts%s; %s usable%s; %s candidates, %s confirmed with real highs and lows."
           % ("{:,}".format(counts["fetched"]), "{:,}".format(len(symbols)),
              (" (%s failed or had no data)" % "{:,}".format(nfailed)) if nfailed else "",

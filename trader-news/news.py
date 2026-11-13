@@ -100,6 +100,25 @@ def _nth_sunday(year, month, n):
     return d + _dt.timedelta(weeks=n - 1)
 
 
+# -------- market selection (NSE by default; set TRADER_MARKET=US for US equities) --------
+# Headline times print in the selected market's wall clock. NSE/BSE run on IST.
+def market_name():
+    return (os.environ.get("TRADER_MARKET") or "NSE").strip().upper()
+
+MARKETS = {
+    "US": {"tz": "ET", "tz_abbrev": "ET"},
+    "NSE": {"tz": "IST", "tz_abbrev": "IST"},
+}
+MARKETS["BSE"] = MARKETS["NSE"]
+
+
+def market():
+    return MARKETS.get(market_name(), MARKETS["NSE"])
+
+
+TZ_ABBREV = market()["tz_abbrev"]
+
+
 def eastern_offset(utc):
     """Hours from UTC for New York: -4 in daylight time, -5 otherwise (US rule since 2007)."""
     y = utc.year
@@ -110,9 +129,11 @@ def eastern_offset(utc):
 
 
 def to_eastern(utc):
-    """Aware or naive UTC -> naive New York wall-clock time."""
+    """Aware or naive UTC -> naive market wall-clock time."""
     if utc.tzinfo is not None:
         utc = utc.astimezone(_dt.timezone.utc)
+    if market()["tz"] == "IST":
+        return utc.replace(tzinfo=None) + _dt.timedelta(minutes=330)
     return utc.replace(tzinfo=None) + _dt.timedelta(hours=eastern_offset(utc))
 
 
@@ -192,7 +213,11 @@ class Fetcher(object):
 
 
 def yahoo_symbol(ticker):
-    return ticker.upper().replace(".", "-")
+    s = ticker.upper()
+    for suffix in (".NS", ".BO", ".NSE", ".BSE"):
+        if s.endswith(suffix):
+            return s[: -len(suffix)].replace(".", "-") + suffix
+    return s.replace(".", "-")
 
 
 def cik_map(fetcher, state):
@@ -439,7 +464,7 @@ def render_moves(moves, move_pct=MOVE_PCT):
     out = []
     for m in moves:
         flag = "MOVING" if abs(m["pct"]) >= move_pct else ""
-        when = (" at %s ET" % to_eastern(m["time"]).strftime("%H:%M")) if m.get("time") else ""
+        when = (" at %s %s" % (to_eastern(m["time"]).strftime("%H:%M"), TZ_ABBREV)) if m.get("time") else ""
         out.append("%-6s %s %+.2f%% vs yesterday's close %s%s  %s" % (
             m["ticker"], "{:,.2f}".format(m["price"]), m["pct"], "{:,.2f}".format(m["prev_close"]),
             when, flag))
@@ -453,7 +478,7 @@ def render(items, errors, now, moves=None, move_pct=MOVE_PCT):
     if not items:
         out.append("Nothing new.")
     for it in items:
-        when = to_eastern(it["time"]).strftime("%Y-%m-%d %H:%M ET") if it["time"] else "time unknown"
+        when = (to_eastern(it["time"]).strftime("%Y-%m-%d %H:%M") + " " + TZ_ABBREV) if it["time"] else "time unknown"
         mark = "!" if it.get("important") else " "
         who = ",".join(it["touches"]) or it["ticker"]
         out.append("%s %s  %-11s %-13s %s" % (mark, when, who, it["source"], it["title"]))
@@ -465,7 +490,7 @@ def render(items, errors, now, moves=None, move_pct=MOVE_PCT):
     for e in errors:
         out.append("note: %s" % e)
     out.append("Checked %s. Headlines are leads, not facts; open the story before acting. "
-               "Not financial advice." % to_eastern(now).strftime("%Y-%m-%d %H:%M ET"))
+               "Not financial advice." % (to_eastern(now).strftime("%Y-%m-%d %H:%M") + " " + TZ_ABBREV))
     return "\n".join(out) + "\n"
 
 

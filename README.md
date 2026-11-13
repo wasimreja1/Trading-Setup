@@ -120,6 +120,39 @@ An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
 9. **`/trader-alerts`** rings on the stop, the target and at 3:55 PM to
    flatten whatever is still open.
 
+## Indian market (NSE and BSE)
+
+This fork trades the Indian market by default. NSE and BSE tickers use Yahoo's
+exchange suffix: `RELIANCE.NS` for NSE, `RELIANCE.BO` for BSE. The session is
+IST (UTC+5:30, no daylight saving), 9:15 to 15:30, 75 five-minute bars.
+
+Pick the market with the `TRADER_MARKET` environment variable (NSE is the
+default when it is unset, so you can leave it off):
+
+```bash
+TRADER_MARKET=NSE python3 trader-scanner/scan.py orb --symbols RELIANCE.NS,TCS.NS,INFY.NS
+TRADER_MARKET=US  python3 trader-scanner/scan.py daily --symbols AAPL,NVDA
+```
+
+Every chart tool follows the selected market: the scanner, entry timer, exit
+planner, time machine, budget, risk, broker timestamps, alerts and news times.
+
+What still needs your attention on NSE:
+
+- There is no built-in NSE/BSE universe. `scan.py universe` downloads a US list,
+  so scan Indian stocks with `--symbols` or a `--watchlist` file for now.
+- The holiday calendar is a best-effort 2026 list. Verify it against the official
+  circular at nseindia.com and edit `NSE_HOLIDAYS` in each tool; 2027 is blank.
+- Copy `trader-budget/config.nse.example.json` for IST entry windows and
+  rupee-sized limits. The money fields are plain numbers; the key names keep the
+  `_usd` suffix for compatibility, so read them as rupees for an Indian account.
+- The order path (`trader-broker`) targets Alpaca, a US brokerage. An Indian
+  broker such as Zerodha needs its own connector; the rest of the chain is broker
+  neutral and paper trading stays the default.
+- `trader-analyst` (SEC EDGAR) and `trader-pelosi` (US Congress) are US only.
+  `trader-news` reads Yahoo headlines, which cover Indian tickers, but its filing
+  logic is US (SEC 8-K).
+
 ## The tools
 
 All standard-library Python. The data tools read public endpoints and are

@@ -3,6 +3,10 @@
 import importlib.util
 import os
 
+# The fixtures and expected numbers are the US (NYSE) example, so the regression
+# suite runs against the US market regardless of the live default (NSE).
+os.environ["TRADER_MARKET"] = "US"
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.path.join(ROOT, "tests", "fixtures")
 

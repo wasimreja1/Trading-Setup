@@ -95,6 +95,58 @@ OPEN = datetime.time(9, 30)
 CLOSE = datetime.time(16, 0)
 EARLY = datetime.time(13, 0)
 
+# -------- market selection (NSE by default; set TRADER_MARKET=US for US equities) --------
+# NSE/BSE trade on IST (UTC+5:30, no daylight saving) from 9:15 to 15:30. The US
+# path above keeps NYSE hours. The table redefines the session.
+def market_name():
+    return (os.environ.get("TRADER_MARKET") or "NSE").strip().upper()
+
+# NSE/BSE weekday trading holidays, best effort for 2026. VERIFY against the
+# official circular at nseindia.com and edit this map. 2027 is left blank.
+NSE_HOLIDAYS = {
+    "2026-01-26": "Republic Day",
+    "2026-03-03": "Holi",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Ambedkar Jayanti",
+    "2026-05-01": "Maharashtra Day",
+    "2026-05-28": "Bakri Id",
+    "2026-06-26": "Muharram",
+    "2026-09-14": "Ganesh Chaturthi",
+    "2026-10-20": "Dussehra",
+    "2026-12-25": "Christmas",
+}
+
+MARKETS = {
+    "US": {"exchange": "NYSE", "hol_label": "NYSE", "hol_url": "nyse.com", "tz": "ET",
+           "tz_label": "New York", "tz_abbrev": "ET", "open": (9, 30), "close": (16, 0),
+           "holidays": NYSE_HOLIDAYS, "early": NYSE_EARLY_CLOSE, "calendar_years": (2026, 2027)},
+    "NSE": {"exchange": "NSE", "hol_label": "NSE", "hol_url": "nseindia.com", "tz": "IST",
+            "tz_label": "IST", "tz_abbrev": "IST", "open": (9, 15), "close": (15, 30),
+            "holidays": NSE_HOLIDAYS, "early": {}, "calendar_years": (2026,)},
+}
+MARKETS["BSE"] = dict(MARKETS["NSE"], exchange="BSE", hol_label="BSE")
+
+
+def market():
+    return MARKETS.get(market_name(), MARKETS["NSE"])
+
+
+def yahoo_symbol(sym):
+    s = sym.upper()
+    for suffix in (".NS", ".BO", ".NSE", ".BSE"):
+        if s.endswith(suffix):
+            return s[: -len(suffix)].replace(".", "-") + suffix
+    return s.replace(".", "-")
+
+
+_M = market()
+EXCHANGE = _M["exchange"]
+TZ_LABEL = _M["tz_label"]
+HOL_URL = _M["hol_url"]
+OPEN = datetime.time(*_M["open"])
+CLOSE = datetime.time(*_M["close"])
+CALENDAR_YEARS = _M["calendar_years"]
+
 
 class AlertError(Exception):
     pass
@@ -119,11 +171,20 @@ def eastern_offset(utc):
     return -4 if start <= naive < end else -5
 
 
+def local_offset(utc):
+    """Minutes to add to naive UTC to get the market's wall clock."""
+    if market()["tz"] == "IST":
+        return 330
+    return eastern_offset(utc) * 60
+
+
 def to_eastern(utc):
-    return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
+    return utc.replace(tzinfo=None) + datetime.timedelta(minutes=local_offset(utc))
 
 
 def eastern_to_utc(local):
+    if market()["tz"] == "IST":
+        return local - datetime.timedelta(minutes=330)
     for off in (-4, -5):
         utc = local - datetime.timedelta(hours=off)
         if eastern_offset(utc) == off:
@@ -149,18 +210,18 @@ def trading_day(d):
     """(is_trading_day, reason). Weekends and the NYSE holiday list."""
     if d.weekday() >= 5:
         return False, "weekend"
-    name = NYSE_HOLIDAYS.get(d.isoformat())
+    name = market()["holidays"].get(d.isoformat())
     if name:
-        return False, "NYSE holiday: " + name
+        return False, "%s holiday: %s" % (market()["hol_label"], name)
     return True, ""
 
 
 def session(d):
-    """(open_time, close_time) in New York time, or None if closed all day."""
+    """(open_time, close_time) in the market's local time, or None if closed all day."""
     ok, _ = trading_day(d)
     if not ok:
         return None
-    return OPEN, (EARLY if d.isoformat() in NYSE_EARLY_CLOSE else CLOSE)
+    return OPEN, (EARLY if d.isoformat() in market()["early"] else CLOSE)
 
 
 def market_status(now_utc):
@@ -169,7 +230,7 @@ def market_status(now_utc):
     ok, reason = trading_day(d)
     st = {"now_new_york": local.strftime("%Y-%m-%d %H:%M"), "date": d.isoformat(),
           "weekday": local.strftime("%A"), "calendar_known": d.year in CALENDAR_YEARS,
-          "open": False, "reason": reason, "early_close": NYSE_EARLY_CLOSE.get(d.isoformat())}
+          "open": False, "reason": reason, "early_close": market()["early"].get(d.isoformat())}
     s = session(d)
     if s:
         o, c = s
@@ -185,7 +246,7 @@ def market_status(now_utc):
     nd = d if (s and local.time() < s[0]) else d + datetime.timedelta(days=1)
     for _ in range(15):
         if session(nd):
-            st["next_open"] = "%s 09:30" % nd.isoformat()
+            st["next_open"] = "%s %s" % (nd.isoformat(), OPEN.strftime("%H:%M"))
             break
         nd += datetime.timedelta(days=1)
     return st
@@ -198,7 +259,7 @@ def stooq_url(sym):
 
 
 def yahoo_url(sym, host=YAHOO_HOSTS[0]):
-    return "https://%s/v8/finance/chart/%s?range=1d&interval=1d" % (host, sym.upper().replace(".", "-"))
+    return "https://%s/v8/finance/chart/%s?range=1d&interval=1d" % (host, yahoo_symbol(sym))
 
 
 def parse_stooq(text, sym):
@@ -441,8 +502,8 @@ def evaluate(rules, quotes, status, state, now_utc):
         typ = {"stop": "below", "target": "above"}.get(r["type"], r["type"])
         if typ == "opening_bell":
             if status["open"] and not _rang_today(rung.get(rid), today):
-                rings.append({"id": rid, "symbol": "", "message": "Opening bell: the NYSE is open (%s New York)%s."
-                              % (status["now_new_york"], (", early close at 1:00 p.m. today, "
+                rings.append({"id": rid, "symbol": "", "message": "Opening bell: the %s is open (%s %s)%s."
+                              % (EXCHANGE, status["now_new_york"], TZ_LABEL, (", early close at 1:00 p.m. today, "
                                                           + status["early_close"]) if status.get("early_close") else "")})
                 rung[rid] = stamp
             continue
@@ -450,8 +511,8 @@ def evaluate(rules, quotes, status, state, now_utc):
             at = ring_time(r, status)
             if status.get("opens") and local.time() >= at and not _rang_today(rung.get(rid), today):
                 label = r.get("label") or "time alert"
-                msg = "%s%s: it is %s New York (set for %s)" % (label[:1].upper(), label[1:],
-                                                                 local.strftime("%H:%M"), at.strftime("%H:%M"))
+                msg = "%s%s: it is %s %s (set for %s)" % (label[:1].upper(), label[1:],
+                                                           local.strftime("%H:%M"), TZ_LABEL, at.strftime("%H:%M"))
                 msg += (", the market closes at %s." % status["closes"]) if status["open"] else \
                     ", the market has closed."
                 sym = str(r.get("symbol") or "").upper()
@@ -547,15 +608,15 @@ def cmd_clock(a):
     if a.json:
         print(json.dumps(st, indent=2))
     else:
-        print("New York %s (%s): NYSE %s, %s." % (st["now_new_york"], st["weekday"],
-                                                  "OPEN" if st["open"] else "closed", st["reason"]))
+        print("%s %s (%s): %s %s, %s." % (TZ_LABEL, st["now_new_york"], st["weekday"],
+                                          EXCHANGE, "OPEN" if st["open"] else "closed", st["reason"]))
         if st.get("opens"):
             print("Today's session: %s to %s%s." % (st["opens"], st["closes"],
                                                     (" (early close: %s)" % st["early_close"]) if st.get("early_close") else ""))
         if not st["open"] and st.get("next_open"):
-            print("Next open: %s New York." % st["next_open"])
+            print("Next open: %s %s." % (st["next_open"], TZ_LABEL))
         if not st["calendar_known"]:
-            print("Holiday list covers %s only: check nyse.com for this date." % " and ".join(map(str, CALENDAR_YEARS)))
+            print("Holiday list covers %s only: check %s for this date." % (" and ".join(map(str, CALENDAR_YEARS)), HOL_URL))
     return 0 if st["open"] else 1
 
 
@@ -605,8 +666,8 @@ def cmd_check(a):
         print(json.dumps({"market": status, "rings": rings, "errors": errors,
                           "quotes": {s: q["price"] for s, q in quotes.items()}}, indent=2))
     else:
-        print("NYSE %s (%s New York, %s)." % ("OPEN" if status["open"] else "closed", status["now_new_york"],
-                                              status["reason"]))
+        print("%s %s (%s %s, %s)." % (EXCHANGE, "OPEN" if status["open"] else "closed", status["now_new_york"],
+                                      TZ_LABEL, status["reason"]))
         for r in rings:
             print("ALERT " + r["message"])
         if not rings:

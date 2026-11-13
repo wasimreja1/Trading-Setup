@@ -84,7 +84,7 @@ PRICE_FIELDS = ("qty", "notional", "limit_price", "stop_price", "take_profit_lim
 TYPES = {"market", "limit", "stop", "stop_limit", "trailing_stop"}
 TIFS = {"day", "gtc", "opg", "cls", "ioc", "fok"}
 OCC = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
-TICKER = re.compile(r"^[A-Z]{1,5}([.\-][A-Z]{1,2})?$")
+TICKER = re.compile(r"^[A-Z0-9]{1,12}([.\-][A-Z]{1,4})?$")  # US (AAPL, BRK.B) and NSE/BSE (RELIANCE.NS)
 HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 CENT = 0.005
 FRESH_MINUTES = 15
@@ -123,6 +123,53 @@ OPEN = datetime.time(9, 30)
 CLOSE = datetime.time(16, 0)
 EARLY = datetime.time(13, 0)
 
+# -------- market selection (NSE by default; set TRADER_MARKET=US for US equities) --------
+# NSE/BSE trade on IST (UTC+5:30, no daylight saving) from 9:15 to 15:30. The US
+# path above keeps NYSE hours. The table redefines the session and entry window.
+def market_name():
+    return (os.environ.get("TRADER_MARKET") or "NSE").strip().upper()
+
+# NSE/BSE weekday trading holidays, best effort for 2026. VERIFY against the
+# official circular at nseindia.com and edit this map. 2027 is left blank.
+NSE_HOLIDAYS = {
+    "2026-01-26": "Republic Day",
+    "2026-03-03": "Holi",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Ambedkar Jayanti",
+    "2026-05-01": "Maharashtra Day",
+    "2026-05-28": "Bakri Id",
+    "2026-06-26": "Muharram",
+    "2026-09-14": "Ganesh Chaturthi",
+    "2026-10-20": "Dussehra",
+    "2026-12-25": "Christmas",
+}
+
+MARKETS = {
+    "US": {"hol_label": "NYSE", "hol_url": "nyse.com", "tz": "ET", "tz_label": "New York",
+           "open": (9, 30), "close": (16, 0), "holidays": NYSE_HOLIDAYS, "early": NYSE_EARLY_CLOSE,
+           "calendar_years": (2026, 2027), "no_entries_before": "09:45", "no_entries_after": "15:30", "flat_by": "15:55"},
+    "NSE": {"hol_label": "NSE", "hol_url": "nseindia.com", "tz": "IST", "tz_label": "IST",
+            "open": (9, 15), "close": (15, 30), "holidays": NSE_HOLIDAYS, "early": {},
+            "calendar_years": (2026,), "no_entries_before": "09:30", "no_entries_after": "15:15", "flat_by": "15:25"},
+}
+MARKETS["BSE"] = dict(MARKETS["NSE"], hol_label="BSE")
+
+
+def market():
+    return MARKETS.get(market_name(), MARKETS["NSE"])
+
+
+_M = market()
+HOL_LABEL = _M["hol_label"]
+HOL_URL = _M["hol_url"]
+TZ_LABEL = _M["tz_label"]
+OPEN = datetime.time(*_M["open"])
+CLOSE = datetime.time(*_M["close"])
+CALENDAR_YEARS = _M["calendar_years"]
+DEFAULTS["no_entries_before"] = _M["no_entries_before"]
+DEFAULTS["no_entries_after"] = _M["no_entries_after"]
+DEFAULTS["flat_by"] = _M["flat_by"]
+
 
 class RiskError(Exception):
     pass
@@ -147,11 +194,20 @@ def eastern_offset(utc):
     return -4 if start <= naive < end else -5
 
 
+def local_offset(utc):
+    """Minutes to add to naive UTC to get the market's wall clock."""
+    if market()["tz"] == "IST":
+        return 330
+    return eastern_offset(utc) * 60
+
+
 def to_eastern(utc):
-    return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
+    return utc.replace(tzinfo=None) + datetime.timedelta(minutes=local_offset(utc))
 
 
 def eastern_to_utc(local):
+    if market()["tz"] == "IST":
+        return local - datetime.timedelta(minutes=330)
     for off in (-4, -5):
         utc = local - datetime.timedelta(hours=off)
         if eastern_offset(utc) == off:
@@ -189,9 +245,9 @@ def trading_day(d):
     """(is_trading_day, reason). Weekends and the NYSE holiday list."""
     if d.weekday() >= 5:
         return False, "weekend"
-    name = NYSE_HOLIDAYS.get(d.isoformat())
+    name = market()["holidays"].get(d.isoformat())
     if name:
-        return False, "NYSE holiday: " + name
+        return False, "%s holiday: %s" % (HOL_LABEL, name)
     return True, ""
 
 
@@ -219,26 +275,26 @@ def window_check(now_et, c):
     warns = []
     d, t = now_et.date(), now_et.time().replace(second=0, microsecond=0)
     if d.year not in CALENDAR_YEARS:
-        warns.append("the holiday list covers %s only: check nyse.com for %s"
-                     % (" and ".join(map(str, CALENDAR_YEARS)), d.isoformat()))
+        warns.append("the holiday list covers %s only: check %s for %s"
+                     % (" and ".join(map(str, CALENDAR_YEARS)), HOL_URL, d.isoformat()))
     ok, why = trading_day(d)
     stamp = now_et.strftime("%a %Y-%m-%d %H:%M")
     if not ok:
-        return ["window: the market is closed today (%s, %s New York)" % (why, stamp)], warns
-    close = EARLY if d.isoformat() in NYSE_EARLY_CLOSE else CLOSE
+        return ["window: the market is closed today (%s, %s %s)" % (why, stamp, TZ_LABEL)], warns
+    close = EARLY if d.isoformat() in market()["early"] else CLOSE
     if t < OPEN or now_et.time() >= close:
-        return ["window: the market is closed (%s New York; the session is %s to %s)"
-                % (stamp, OPEN.strftime("%H:%M"), close.strftime("%H:%M"))], warns
+        return ["window: the market is closed (%s %s; the session is %s to %s)"
+                % (stamp, TZ_LABEL, OPEN.strftime("%H:%M"), close.strftime("%H:%M"))], warns
     if close == EARLY and after is not None:
         after = _shift(after, 3)
         warns.append("early close at 1:00 p.m. today (%s): no new entries after %s"
-                     % (NYSE_EARLY_CLOSE[d.isoformat()], after.strftime("%H:%M")))
+                     % (market()["early"][d.isoformat()], after.strftime("%H:%M")))
     if before is not None and t < before:
-        return ["window: no new entries before %s New York (it is %s)" % (before.strftime("%H:%M"),
-                                                                          t.strftime("%H:%M"))], warns
+        return ["window: no new entries before %s %s (it is %s)" % (before.strftime("%H:%M"), TZ_LABEL,
+                                                                     t.strftime("%H:%M"))], warns
     if after is not None and t > after:
-        return ["window: no new entries after %s New York (it is %s)" % (after.strftime("%H:%M"),
-                                                                         t.strftime("%H:%M"))], warns
+        return ["window: no new entries after %s %s (it is %s)" % (after.strftime("%H:%M"), TZ_LABEL,
+                                                                    t.strftime("%H:%M"))], warns
     return [], warns
 
 
@@ -480,7 +536,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
             else:
                 warns.append("option order: options can lose 100%% of what you pay")
         elif sym and ("/" in sym or not TICKER.match(sym)):
-            reasons.append("asset: %s does not look like a US stock or ETF ticker; "
+            reasons.append("asset: %s does not look like a stock or ETF ticker; "
                            "this pack trades stocks and ETFs only" % sym)
 
         # the reference price: what one share costs to get in

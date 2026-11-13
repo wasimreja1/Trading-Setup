@@ -67,6 +67,29 @@ def _nth_sunday(year, month, n):
     return d + datetime.timedelta(weeks=n - 1)
 
 
+# -------- market selection (NSE by default; set TRADER_MARKET=US for US equities) --------
+# Timestamps and the flat-by label follow the selected market. NSE/BSE run on
+# IST (UTC+5:30). Note the order path here targets Alpaca (US brokerage); an
+# Indian broker needs its own connector (see the README).
+def market_name():
+    return (os.environ.get("TRADER_MARKET") or "NSE").strip().upper()
+
+MARKETS = {
+    "US": {"tz": "ET", "tz_label": "New York", "flat_by": "15:55"},
+    "NSE": {"tz": "IST", "tz_label": "IST", "flat_by": "15:25"},
+}
+MARKETS["BSE"] = MARKETS["NSE"]
+
+
+def market():
+    return MARKETS.get(market_name(), MARKETS["NSE"])
+
+
+_M = market()
+TZ_LABEL = _M["tz_label"]
+FLAT_BY_DEFAULT = _M["flat_by"]
+
+
 def eastern_offset(utc):
     """Hours from UTC for New York: -4 in daylight time, -5 otherwise.
     DST runs from 2:00 a.m. on the second Sunday of March to 2:00 a.m. on the
@@ -78,11 +101,20 @@ def eastern_offset(utc):
     return -4 if start <= naive < end else -5
 
 
+def local_offset(utc):
+    """Minutes to add to naive UTC to get the market's wall clock."""
+    if market()["tz"] == "IST":
+        return 330
+    return eastern_offset(utc) * 60
+
+
 def to_eastern(utc):
-    return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
+    return utc.replace(tzinfo=None) + datetime.timedelta(minutes=local_offset(utc))
 
 
 def eastern_to_utc(local):
+    if market()["tz"] == "IST":
+        return local - datetime.timedelta(minutes=330)
     for off in (-4, -5):
         utc = local - datetime.timedelta(hours=off)
         if eastern_offset(utc) == off:
@@ -105,9 +137,11 @@ def parse_now(text):
 
 
 def ny_iso(now_utc):
-    """naive UTC -> "2026-10-19T10:15:00-04:00" (New York wall clock with its offset)."""
-    off = eastern_offset(now_utc)
-    return "%s%+03d:00" % (to_eastern(now_utc).replace(microsecond=0).isoformat(), off)
+    """naive UTC -> ISO wall clock with the market's offset (e.g. ...-04:00 for ET, ...+05:30 for IST)."""
+    mins = local_offset(now_utc)
+    sign = "+" if mins >= 0 else "-"
+    mins = abs(mins)
+    return "%s%s%02d:%02d" % (to_eastern(now_utc).replace(microsecond=0).isoformat(), sign, mins // 60, mins % 60)
 
 
 # ---------------------------------------------------------------- files
@@ -602,10 +636,10 @@ def cmd_flatten(a):
                               "%s) and pass --qty if you do hold some" % (sym, a.portfolio, sym))
     plan = read_json(a.plan, "plan", required=False) or {}
     flat_by = (plan.get("flat_by") if str(plan.get("symbol", "")).upper() == sym else None) \
-        or cfg.get("flat_by") or "15:55"
+        or cfg.get("flat_by") or FLAT_BY_DEFAULT
     order = {"symbol": sym, "side": "sell", "qty": _str_num(qty), "type": "market", "time_in_force": "day",
-             "why": "flat by %s New York: closes the %s day trade before the close (qty from %s)"
-             % (flat_by, sym, source)}
+             "why": "flat by %s %s: closes the %s day trade before the close (qty from %s)"
+             % (flat_by, TZ_LABEL, sym, source)}
     old = read_json(a.orders, "orders", required=False)
     replaced = len(old.get("orders", [])) if isinstance(old, dict) else 0
     doc = {"created_by": "trader-broker", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "status": "proposed",
@@ -613,7 +647,7 @@ def cmd_flatten(a):
            "note": "Flatten ticket. Nothing is placed until trader-risk passes it and you say yes in the chat.",
            "source": "ticket.py flatten %s on %s" % (sym, today), "orders": [order]}
     write_json(a.orders, doc)
-    print("Flatten %s: %s (flat by %s New York)." % (sym, plain(order), flat_by))
+    print("Flatten %s: %s (flat by %s %s)." % (sym, plain(order), flat_by, TZ_LABEL))
     print("Wrote it to %s%s." % (a.orders, (" (it replaced %d earlier proposal%s)"
                                              % (replaced, "" if replaced == 1 else "s")) if replaced else ""))
     if a.qty is None:
