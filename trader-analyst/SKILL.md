@@ -1,6 +1,8 @@
 ---
 name: trader-analyst
 description: >-
+  US only: reads SEC EDGAR (US GAAP filings), so there is no Indian-market
+  equivalent in this pack.
   The Earnings Analyst. Reads a company's reported numbers straight from SEC
   EDGAR (XBRL company facts from its 10-Qs and 10-Ks, plus the latest earnings
   8-K and its press release) and sums up what changed: revenue, gross,

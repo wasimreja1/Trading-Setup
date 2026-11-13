@@ -1,6 +1,8 @@
 ---
 name: trader-budget
 description: >-
+  NSE/BSE by default (IST; use .NS/.BO tickers; set TRADER_MARKET=US for US).
+  The money limits are plain numbers, read as rupees for an Indian account.
   Budget Manager. Sizes every position to your budget and your max loss per
   trade. Reads the trade plan from trader-exit (entry, stop, target), finds
   the whole shares that fit inside four limits (max loss per trade, position

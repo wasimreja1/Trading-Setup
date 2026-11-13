@@ -1,6 +1,7 @@
 ---
 name: trader-pelosi
 description: >-
+  US only: US Congress STOCK Act disclosures, not applicable to Indian markets.
   The Pelosi Tracker. Watches the stock trades members of Congress must
   disclose under the STOCK Act: reads the House Clerk's public Periodic
   Transaction Reports (PTRs) as soon as they are posted, alerts once per new

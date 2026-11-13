@@ -1,6 +1,8 @@
 ---
 name: trader-entry
 description: >-
+  NSE/BSE by default (IST 9:15-15:30; use .NS/.BO tickers; set TRADER_MARKET=US
+  for US).
   Entry Timer. Watches a setup bar by bar and tells you the moment to get in.
   Reads free Yahoo 1-minute or 5-minute bars, builds the opening range (the
   first 15 minutes by default) and calls the entry on the first completed bar

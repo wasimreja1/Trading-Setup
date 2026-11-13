@@ -1,6 +1,8 @@
 ---
 name: trader-news
 description: >-
+  NSE/BSE by default (IST; use .NS/.BO tickers; set TRADER_MARKET=US for US).
+  Yahoo headlines cover Indian tickers; the SEC 8-K filings part is US only.
   News Monitor. Tracks breaking news on every stock you watch and flags what
   moves it: Yahoo Finance headlines per ticker, each company's 8-K filings on
   SEC EDGAR (earnings, CEO changes, deals, restatements, bankruptcy) and how

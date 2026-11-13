@@ -1,6 +1,8 @@
 ---
 name: trader-scanner
 description: >-
+  NSE/BSE by default (IST 9:15-15:30; use .NS/.BO tickers; set TRADER_MARKET=US
+  for US). There is no built-in NSE universe yet, so pass --symbols or a watchlist.
   Chart Scanner. Scans thousands of charts for setups: opening-range
   breakouts, flags, oversold bounces. Builds the list of US-listed common
   stocks, ordinary shares and ADRs from Nasdaq Trader's symbol directories,

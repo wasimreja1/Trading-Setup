@@ -1,6 +1,8 @@
 ---
 name: trader-timemachine
 description: >-
+  NSE/BSE by default (IST 9:15-15:30, 75 five-minute bars; use .NS/.BO tickers;
+  set TRADER_MARKET=US for US).
   Time Machine. Replays every possible outcome of a trade before you risk a
   dollar: 10,000 simulated sessions plus every past time the setup fired.
   Takes the plan from trader-exit (entry, stop, target), rebuilds the rest of

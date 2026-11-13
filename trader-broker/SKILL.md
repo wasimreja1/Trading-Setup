@@ -1,6 +1,8 @@
 ---
 name: trader-broker
 description: >-
+  NSE/BSE session by default, but the order path is Alpaca (US); an Indian
+  broker such as Zerodha needs its own connector. Paper trading by default.
   Order Executor. Sends approved orders to your broker, paper trading by
   default, never without your yes. Shows each order as a plain ticket (a
   bracket shows its stop-loss, take-profit and the max loss at the stop)

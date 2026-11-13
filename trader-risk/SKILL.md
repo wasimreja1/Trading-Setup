@@ -1,6 +1,8 @@
 ---
 name: trader-risk
 description: >-
+  NSE/BSE by default (IST entry window to 15:30; use .NS/.BO tickers; set
+  TRADER_MARKET=US for US).
   Risk Manager. Checks every trade against your limits and stops anything
   over them, before it can reach the broker. For a day trade: a stop is
   required, the loss at the stop must fit your max loss per trade (measured

@@ -1,6 +1,8 @@
 ---
 name: trader-exit
 description: >-
+  NSE/BSE by default (IST 9:15-15:30, flat-by near 15:25 IST; use .NS/.BO
+  tickers; set TRADER_MARKET=US for US).
   Exit Planner. Sets your stop and your target before you enter, so you know
   when to get out. Reads the entry from trader-entry (or a price you give),
   puts the stop at the opening-range midpoint by default (or the range low,

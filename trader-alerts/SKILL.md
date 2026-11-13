@@ -1,6 +1,8 @@
 ---
 name: trader-alerts
 description: >-
+  NSE/BSE by default (IST 9:15-15:30 opening bell and flat-by; use .NS/.BO
+  tickers; set TRADER_MARKET=US for US).
   Price Alerts. Rings when a price, a stop or the opening bell hits. Turns
   the trade plan into three alerts in one go (the stop, the target and "flat
   by close" at your flat-by time), plus above / below / stop / target levels,
